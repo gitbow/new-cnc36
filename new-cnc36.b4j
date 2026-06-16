@@ -1,0 +1,979 @@
+﻿AppType=JavaFX
+Build1=Default,b4j.example
+Group=Default Group
+Library1=javaobject
+Library2=jcore
+Library3=jfx
+Library4=jserial
+Library5=jxui
+Library6=jrandomaccessfile
+Module1=GcodePlotter
+Module2=|relative|..\SerialCom
+NumberOfFiles=0
+NumberOfLibraries=6
+NumberOfModules=2
+Version=10.5
+@EndOfDesignText@
+#AdditionalJar: jSerial
+
+Sub Process_Globals
+	'Private sc As SerialCom
+	Private xCons As B4XView   ' declare your text box here
+	Private fx As JFX
+	Private MainForm As Form
+	Private xui As XUI
+	Private Plotter As GcodePlotter
+	Private Viewport1 As Pane
+	' Colors matching the image
+	Private COLOR_BG As Int = 0xFF3A3A3A
+	Private COLOR_DARK_PANEL As Int = 0xFF000000
+	Private COLOR_VIEWPORT2 As Int = 0xFF545454
+	Private COLOR_CNC_BLUE As Int = 0xFF1B82D2
+	Private COLOR_CNC_GREEN As Int = 0xFF22B14C
+	Private COLOR_CNC_RED As Int = 0xFFED1C24
+	
+	Private GcodeListView As ListView
+	Private CurrentGCodeLines As List
+	Private UpdatingHighlight As Boolean = False
+	
+	Private sc As SerialCom
+	Private statusTimer As Timer
+	Private astream As AsyncStreams
+	Private mCallback As Object
+	
+	
+End Sub
+
+Sub AppStart (Form1 As Form, Args() As String)
+	MainForm = Form1
+	MainForm.Title = "Precision CNC Controller"
+    
+	' Force the window canvas frame to completely fill the desktop natively
+	Dim JoForm As JavaObject = MainForm
+	JoForm.GetFieldJO("stage").RunMethod("setMaximized", Array(True))
+    
+	MainForm.Show
+    
+	' Trigger the layout drawer immediately after showing the window frame
+	MainForm_Resize(MainForm.RootPane.Width, MainForm.RootPane.Height)
+	'sc.Initialize
+	sc.Initialize(Me)
+	statusTimer.Initialize("statusTimer", 1000)   ' 1000 ms = 1 second
+
+End Sub
+
+Sub MainForm_Resize (Width As Double, Height As Double)
+	' Guard against early execution errors before the window is ready
+	If Width <= 0 Or Height <= 0 Then Return
+    
+	' Clean the canvas so elements don't duplicate on top of each other
+	MainForm.RootPane.RemoveAllNodes
+    
+	' 🎛️ MARGIN ADJUSTMENT SETTING
+	Dim EdgeMarginPercent As Double = 0.05
+    
+	' Dynamic positioning math based on active window size
+	Dim StartX As Double = Width * (EdgeMarginPercent / 2)
+	Dim StartY As Double = Height * (EdgeMarginPercent / 2)
+	Dim TargetWidth As Double = Width * (1.0 - EdgeMarginPercent)
+	Dim TargetHeight As Double = Height * (1.0 - EdgeMarginPercent)
+    
+	' Re-create the responsive main root pane zone inside the new dimensions
+	Dim Root As Pane
+	Root.Initialize("")
+	MainForm.RootPane.AddNode(Root, StartX, StartY, TargetWidth, TargetHeight)
+    
+	Dim xRoot As B4XView = Root
+	xRoot.Color = COLOR_BG
+    
+	' Calculate global fluid column widths based on current resolution
+	Dim MenuHeight As Double = TargetHeight * 0.055
+	Dim LeftToolbarWidth As Double = TargetWidth * 0.045
+	Dim MainContentWidth As Double = TargetWidth - LeftToolbarWidth
+    
+	Dim Col1Width As Double = MainContentWidth * 0.40
+	Dim Col2Width As Double = MainContentWidth * 0.46
+	Dim Col3Width As Double = MainContentWidth * 0.14
+    
+	' Redraw all elements with the precise layout math
+	CreateTopMenuBar(Root, TargetWidth, MenuHeight)
+	CreateLeftToolbar(Root, LeftToolbarWidth, MenuHeight, TargetHeight)
+	CreateViewportSection(Root, LeftToolbarWidth, MenuHeight, Col1Width, TargetHeight)
+	CreateDroSection(Root, LeftToolbarWidth + Col1Width, MenuHeight, Col2Width, TargetHeight)
+	CreateMdiAndFileSection(Root, LeftToolbarWidth + Col1Width, MenuHeight, Col2Width, TargetHeight)
+	CreateRightControlPanel(Root, LeftToolbarWidth + Col1Width + Col2Width, MenuHeight, Col3Width, TargetHeight)
+	' Link the plotter object instance to Viewport1 (which is the black pane)
+	'Plotter.Initialize(MainForm, Viewport1)
+	' Add this redraw call below your initialization line inside MainForm_Resize
+	Plotter.Initialize(MainForm, Viewport1)
+	Plotter.RefreshPlotterLayout
+	' <-- Add this here to keep drawings visible during screen scaling
+
+End Sub
+
+' 1. Top Navigation Menu Bar (Fluid Width)
+Sub CreateTopMenuBar(Parent As Pane, TotalWidth As Double, H As Double)
+	Dim MenuItems() As String = Array As String("RUN", "TOOLPATH", "OFFSETS", "TOOLS", "CONFIGURATION", "DIAGNOSTICS", "CAM", "HELP")
+	Dim ButtonWidth As Double = TotalWidth / MenuItems.Length
+    
+	For i = 0 To MenuItems.Length - 1
+		Dim btn As Button
+		btn.Initialize("MenuBtn")
+		Dim xBtn As B4XView = btn
+		xBtn.Text = MenuItems(i)
+		xBtn.Font = fx.CreateFont("Arial", 12, True, False)
+        
+		If i = 0 Then
+			xBtn.Color = COLOR_CNC_RED
+			xBtn.TextColor = xui.Color_White
+		Else
+			xBtn.Color = xui.Color_White
+			xBtn.TextColor = 0xFF555555
+		End If
+        
+		btn.Style = "-fx-background-radius: 0; -fx-border-color: #A0A0A0; -fx-border-width: 1;"
+		Parent.AddNode(btn, i * ButtonWidth, 0, ButtonWidth, H)
+	Next
+End Sub
+
+' 2. Leftmost Vertical Tool Palette (Fluid Scaling)
+Sub CreateLeftToolbar(Parent As Pane, W As Double, TopOffset As Double, TotalHeight As Double)
+	Dim ToolPanel As Pane
+	ToolPanel.Initialize("")
+	Parent.AddNode(ToolPanel, 0, TopOffset, W, TotalHeight - TopOffset)
+    
+	' Add RESET button at the start
+	Dim Icons() As String = Array As String("RESET", "Z_ALL", "Z_IN", "Z_OUT", "TOP", "FRONT", "SIDE", "ISO")
+	Dim RowHeight As Double = (TotalHeight - TopOffset) / 12
+    
+	For i = 0 To Icons.Length - 1
+		Dim btnIcon As Button
+		btnIcon.Initialize("IconBtn")
+		Dim xIcon As B4XView = btnIcon
+		xIcon.Text = Icons(i)
+		xIcon.Font = fx.CreateFont("Arial", 12, True, False)
+		xIcon.Color = xui.Color_White
+		xIcon.TextColor = xui.Color_Black
+		btnIcon.Style = "-fx-border-color: #B0BEC5; -fx-border-radius: 2; -fx-background-radius: 2;"
+		ToolPanel.AddNode(btnIcon, W * 0.1, 10 + (i * RowHeight), W * 0.8, RowHeight * 0.85)
+	Next
+End Sub
+
+' 3. Dual Left-Center Viewports (Stretches to fill Left Half)
+Sub CreateViewportSection(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+	Dim UsableHeight As Double = TotalHeight - TopOffset
+	Dim VP1Height As Double = UsableHeight * 0.52
+	Dim VP2Height As Double = UsableHeight * 0.45
+	Dim Gap As Double = UsableHeight * 0.02
+    
+	' Upper Primary 3D Workspace Simulator
+	Viewport1.Initialize("")
+	Dim xVP1 As B4XView = Viewport1
+	xVP1.Color = COLOR_DARK_PANEL
+	Viewport1.Style = "-fx-border-color: #707070; -fx-border-width: 2;"
+	Parent.AddNode(Viewport1, LeftOffset + 5, TopOffset + 5, W - 10, VP1Height)
+    
+	' Lower G-Code Text Viewer (ListView instead of Pane)
+	Dim lstGcode As ListView
+	lstGcode.Initialize("lstGcode")
+	Dim xList As B4XView = lstGcode
+	xList.Color = COLOR_VIEWPORT2
+	lstGcode.Style = "-fx-font-family: 'Courier New'; -fx-font-size: 12; -fx-border-color: #707070; -fx-border-width: 2;"
+	Parent.AddNode(lstGcode, LeftOffset + 5, TopOffset + VP1Height + Gap, W - 10, VP2Height)
+    
+	' Store for later use
+	GcodeListView = lstGcode
+End Sub
+
+' 4. Center-Right Panel Grid (DRO, Overrides, Offsets, MDI)
+'
+
+Sub CreateDroSection(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+	' Top Main DRO Container
+	Dim DroPanel As Pane
+	DroPanel.Initialize("")
+	DroPanel.Style = "-fx-border-color: #A0A0A0; -fx-border-width: 1; -fx-background-color: #EBEBEB;"
+	Parent.AddNode(DroPanel, LeftOffset + 5, TopOffset + 5, W - 10, (TotalHeight - TopOffset) * 0.32)
+    
+	Dim DHeight As Double = (TotalHeight - TopOffset) * 0.32
+    
+	' Vertical Title Header Panel
+	Dim lblTitle As Label
+	lblTitle.Initialize("")
+	lblTitle.Text = "M" & CRLF & "A" & CRLF & "C" & CRLF & "H" & CRLF & "I" & CRLF & "N" & CRLF & "E"
+	lblTitle.Alignment = "CENTER"
+	Dim xTitle As B4XView = lblTitle
+	xTitle.Font = fx.CreateFont("Arial Narrow", 9, True, False)
+	xTitle.Color = xui.Color_White
+	xTitle.TextColor = COLOR_CNC_BLUE
+	lblTitle.Style = "-fx-border-color: #1B82D2; -fx-border-width: 1;"
+	DroPanel.AddNode(lblTitle, 2, 2, 22, DHeight - 6)
+    
+	' Zero All Master Button Group
+	Dim btnZeroAll As Button
+	btnZeroAll.Initialize("ZeroAll")
+	Dim xZeroAll As B4XView = btnZeroAll
+	xZeroAll.Text = "ZERO" & CRLF & "ALL"
+	xZeroAll.Font = fx.CreateFont("Arial", 9, True, False)
+	xZeroAll.Color = xui.Color_White
+	xZeroAll.TextColor = COLOR_CNC_BLUE
+	' UPDATED: Rounded corners added to Zero All button
+	btnZeroAll.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: #1B82D2; -fx-border-width: 1; -fx-text-alignment: center;"
+	DroPanel.AddNode(btnZeroAll, 26, 2, 45, DHeight - 6)
+    
+	' Complete Responsive Multi-Axis Rows Mapping (X, Y, Z, A, B, C)
+	Dim Axes() As String = Array As String("X", "Y", "Z", "A", "B", "C")
+	Dim Values() As String = Array As String("10.0000", "-49.4400", "-5.0000", "0.0000", "0.0000", "0.0000")
+    
+	Dim RowH As Double = (DHeight - 6) / Axes.Length
+	Dim RemainderW As Double = W - 10 - 75
+    
+	For i = 0 To Axes.Length - 1
+		Dim YPos As Double = i * RowH
+        
+		Dim btnZero As Button
+		btnZero.Initialize("ZeroAxis")
+		Dim xZero As B4XView = btnZero
+		xZero.Text = "Ø"
+		xZero.TextColor = COLOR_CNC_BLUE
+		xZero.Color = xui.Color_White
+		' UPDATED: Rounded corners added to individual Axis Zero buttons
+		btnZero.Style = "-fx-background-color: white; -fx-background-radius: 6; -fx-border-radius: 6; -fx-border-color: #A0A0A0; -fx-border-width: 1; -fx-padding: 0;"
+		DroPanel.AddNode(btnZero, 75, YPos + 2, RemainderW * 0.06, RowH - 2)
+        
+		Dim lblAxis As Label
+		lblAxis.Initialize("")
+		lblAxis.Text = Axes(i)
+		lblAxis.Alignment = "CENTER"
+		Dim xAx As B4XView = lblAxis
+		xAx.Font = fx.CreateFont("Arial", 12, True, False)
+		xAx.TextColor = COLOR_CNC_BLUE
+		lblAxis.Style = "-fx-border-color: #A0A0A0;"
+		DroPanel.AddNode(lblAxis, 75 + (RemainderW * 0.06), YPos + 2, RemainderW * 0.06, RowH - 2)
+        
+		' Blue Rectangle Outline Pane around the Display Elements
+		Dim pnlValueBorder As Pane
+		pnlValueBorder.Initialize("")
+		pnlValueBorder.Style = "-fx-background-color: transparent; -fx-border-color: #1B82D2; -fx-border-width: 1.5; -fx-border-radius: 4;"
+		Dim BoxLeft As Double = 75 + (RemainderW * 0.12)
+		Dim BoxWidth As Double = RemainderW * 0.78
+		DroPanel.AddNode(pnlValueBorder, BoxLeft, YPos + 2, BoxWidth, RowH - 2)
+
+		Dim lblScale As Label
+		lblScale.Initialize("")
+		lblScale.Text = "DTG 0.0" & CRLF & "Scale 1.0"
+		Dim xScale As B4XView = lblScale
+		xScale.Font = fx.CreateFont("Arial", 8, False, False)
+		xScale.TextColor = COLOR_CNC_BLUE
+		lblScale.Style = "-fx-padding: 0 0 0 4;"
+		DroPanel.AddNode(lblScale, 75 + (RemainderW * 0.12), YPos + 2, RemainderW * 0.20, RowH - 2)
+        
+		Dim lblVal As Label
+		lblVal.Initialize("")
+		lblVal.Text = Values(i)
+		lblVal.Alignment = "CENTER_RIGHT"
+		Dim xVal As B4XView = lblVal
+		xVal.Font = fx.CreateFont("Courier New", 18, True, False)
+		xVal.TextColor = COLOR_CNC_BLUE
+		lblVal.Style = "-fx-padding: 0 5 0 0;"
+		DroPanel.AddNode(lblVal, 75 + (RemainderW * 0.32), YPos + 2, RemainderW * 0.58, RowH - 2)
+        
+		Dim btnHome As Button
+		btnHome.Initialize("HomeAxis")
+		Dim xHome As B4XView = btnHome
+		xHome.Text = "🎯"
+		xHome.Color = xui.Color_White
+		' UPDATED: Rounded corners added to Axis Home buttons
+		btnHome.Style = "-fx-background-color: white; -fx-background-radius: 6; -fx-border-radius: 6; -fx-border-color: red; -fx-border-width: 1; -fx-padding: 0;"
+		DroPanel.AddNode(btnHome, 75 + (RemainderW * 0.90), YPos + 2, RemainderW * 0.09, RowH - 2)
+	Next
+End Sub
+
+
+'Sub CreateDroSection(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+'	' Top Main DRO Container
+'	Dim DroPanel As Pane
+'	DroPanel.Initialize("")
+'	DroPanel.Style = "-fx-border-color: #A0A0A0; -fx-border-width: 1; -fx-background-color: #EBEBEB;"
+'	Parent.AddNode(DroPanel, LeftOffset + 5, TopOffset + 5, W - 10, (TotalHeight - TopOffset) * 0.32)
+'    
+'	Dim DHeight As Double = (TotalHeight - TopOffset) * 0.32
+'    
+'	' Vertical Title Header Panel
+'	Dim lblTitle As Label
+'	lblTitle.Initialize("")
+'	lblTitle.Text = "M" & CRLF & "A" & CRLF & "C" & CRLF & "H" & CRLF & "I" & CRLF & "N" & CRLF & "E"
+'	lblTitle.Alignment = "CENTER"
+'	Dim xTitle As B4XView = lblTitle
+'	xTitle.Font = fx.CreateFont("Arial Narrow", 9, True, False)
+'	xTitle.Color = xui.Color_White
+'	xTitle.TextColor = COLOR_CNC_BLUE
+'	lblTitle.Style = "-fx-border-color: #1B82D2; -fx-border-width: 1;"
+'	DroPanel.AddNode(lblTitle, 2, 2, 22, DHeight - 6)
+'    
+'	' Zero All Master Button Group
+'	Dim btnZeroAll As Button
+'	btnZeroAll.Initialize("ZeroAll")
+'	Dim xZeroAll As B4XView = btnZeroAll
+'	xZeroAll.Text = "ZERO" & CRLF & "ALL"
+'	xZeroAll.Font = fx.CreateFont("Arial", 9, True, False)
+'	xZeroAll.Color = xui.Color_White
+'	xZeroAll.TextColor = COLOR_CNC_BLUE
+'	btnZeroAll.Style = "-fx-border-color: #1B82D2; -fx-text-alignment: center;"
+'	DroPanel.AddNode(btnZeroAll, 26, 2, 45, DHeight - 6)
+'    
+'	' Complete Responsive Multi-Axis Rows Mapping (X, Y, Z, A, B, C)
+'	Dim Axes() As String = Array As String("X", "Y", "Z", "A", "B", "C")
+'	Dim Values() As String = Array As String("10.0000", "-49.4400", "-5.0000", "0.0000", "0.0000", "0.0000")
+'    
+'	Dim RowH As Double = (DHeight - 6) / Axes.Length
+'	Dim RemainderW As Double = W - 10 - 75
+'    
+'	For i = 0 To Axes.Length - 1
+'		Dim YPos As Double = i * RowH
+'        
+'		Dim btnZero As Button
+'		btnZero.Initialize("ZeroAxis")
+'		Dim xZero As B4XView = btnZero
+'		xZero.Text = "Ø"
+'		xZero.TextColor = COLOR_CNC_BLUE
+'		xZero.Color = xui.Color_White
+'		btnZero.Style = "-fx-border-color: #A0A0A0; -fx-padding: 0;"
+'		DroPanel.AddNode(btnZero, 75, YPos + 2, RemainderW * 0.06, RowH - 2)
+'        
+'		Dim lblAxis As Label
+'		lblAxis.Initialize("")
+'		lblAxis.Text = Axes(i)
+'		lblAxis.Alignment = "CENTER"
+'		Dim xAx As B4XView = lblAxis
+'		xAx.Font = fx.CreateFont("Arial", 12, True, False)
+'		xAx.TextColor = COLOR_CNC_BLUE
+'		lblAxis.Style = "-fx-border-color: #A0A0A0;"
+'		DroPanel.AddNode(lblAxis, 75 + (RemainderW * 0.06), YPos + 2, RemainderW * 0.06, RowH - 2)
+'        
+'		' -------------------------------------------------------------
+'		' ADDED: Blue Rectangle Outline Pane around the Display Elements
+'		' -------------------------------------------------------------
+'		Dim pnlValueBorder As Pane
+'		pnlValueBorder.Initialize("")
+'		' Transparent background, crisp solid blue border (can use hex like #1B82D2 or #0000FF)
+'		pnlValueBorder.Style = "-fx-background-color: transparent; -fx-border-color: #1B82D2; -fx-border-width: 1.5; -fx-border-radius: 4;"
+'		
+'		' Spans from start of Scale Label to the end of Value Label (0.20 + 0.58 = 0.78 total width)
+'		Dim BoxLeft As Double = 75 + (RemainderW * 0.12)
+'		Dim BoxWidth As Double = RemainderW * 0.78
+'		DroPanel.AddNode(pnlValueBorder, BoxLeft, YPos + 2, BoxWidth, RowH - 2)
+'		' -------------------------------------------------------------
+'
+'		Dim lblScale As Label
+'		lblScale.Initialize("")
+'		lblScale.Text = "DTG 0.0" & CRLF & "Scale 1.0"
+'		Dim xScale As B4XView = lblScale
+'		xScale.Font = fx.CreateFont("Arial", 8, False, False)
+'		xScale.TextColor = COLOR_CNC_BLUE
+'		' Small internal left padding added to prevent text from hugging the new border edge
+'		lblScale.Style = "-fx-padding: 0 0 0 4;"
+'		DroPanel.AddNode(lblScale, 75 + (RemainderW * 0.12), YPos + 2, RemainderW * 0.20, RowH - 2)
+'        
+'		Dim lblVal As Label
+'		lblVal.Initialize("")
+'		lblVal.Text = Values(i)
+'		lblVal.Alignment = "CENTER_RIGHT"
+'		Dim xVal As B4XView = lblVal
+'		xVal.Font = fx.CreateFont("Courier New", 18, True, False)
+'		xVal.TextColor = COLOR_CNC_BLUE
+'		lblVal.Style = "-fx-padding: 0 5 0 0;"
+'		DroPanel.AddNode(lblVal, 75 + (RemainderW * 0.32), YPos + 2, RemainderW * 0.58, RowH - 2)
+'        
+'		Dim btnHome As Button
+'		btnHome.Initialize("HomeAxis")
+'		Dim xHome As B4XView = btnHome
+'		xHome.Text = "🎯"
+'		xHome.Color = xui.Color_White
+'		btnHome.Style = "-fx-border-color: red; -fx-padding: 0;"
+'		DroPanel.AddNode(btnHome, 75 + (RemainderW * 0.90), YPos + 2, RemainderW * 0.09, RowH - 2)
+'	Next
+'End Sub
+'
+
+ 
+'================================================================================================================================
+'' 5. MDI Command Entry Line & Sliders
+
+
+
+
+
+Sub CreateMdiAndFileSection(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+	Dim UsableHeight As Double = TotalHeight - TopOffset
+	Dim TopBoxHeight As Double = UsableHeight * 0.32
+    
+	Dim MidPanel As Pane
+	MidPanel.Initialize("")
+	Parent.AddNode(MidPanel, LeftOffset + 5, TopOffset + TopBoxHeight + 10, W - 10, UsableHeight - TopBoxHeight - 15)
+    
+	Dim MHeight As Double = UsableHeight - TopBoxHeight - 15
+    
+	' Top Action Row buttons (LOAD FILE etc) Spanning fluidly
+	' -------------------------------------------------------------
+	' File Actions Row
+	' -------------------------------------------------------------
+	Dim FileActions() As String = Array As String("LOAD FILE", "EDIT FILE", "REWIND FILE", "CLOSE FILE")
+	Dim ActBtnW As Double = (W - 10) / FileActions.Length
+
+	For i = 0 To FileActions.Length - 1
+		Dim btnAct As Button
+		btnAct.Initialize("FileAct")
+		Dim xAct As B4XView = btnAct
+		xAct.Text = FileActions(i)
+		xAct.Font = fx.CreateFont("Arial Narrow", 11, True, False)
+		xAct.Color = xui.Color_White
+		btnAct.Style = "-fx-border-color: #A0A0A0;"
+		'MidPanel.AddNode(btnAct, i * ActBtnW, 0, ActBtnW - 2, MHeight * 0.12)
+		MidPanel.AddNode(btnAct, i * ActBtnW, 0, ActBtnW - 2, MHeight * 0.05)
+	Next
+
+	' -------------------------------------------------------------
+	' MDI Command Input Field Header banner
+	' -------------------------------------------------------------
+	Dim lblMdiHeader As Label
+	lblMdiHeader.Initialize("")
+	Dim xMdiH As B4XView = lblMdiHeader
+	xMdiH.Text = " MDI - COMMAND ENTRY"
+	xMdiH.Font = fx.CreateFont("Arial", 15, True, False)
+	xMdiH.Color = COLOR_CNC_BLUE
+	xMdiH.TextColor = xui.Color_White
+	MidPanel.AddNode(lblMdiHeader, 0, MHeight * 0.15, W - 10, MHeight * 0.09)
+
+	' -------------------------------------------------------------
+	' Active Codes display line
+	' -------------------------------------------------------------
+	Dim lblActiveG As Label
+	lblActiveG.Initialize("")
+	lblActiveG.Text = "ACTIVE: G0|G17|G40|G49|G50|G54|G64|G69|G90|G94|G98"
+	Dim xAG As B4XView = lblActiveG
+	xAG.Font = fx.CreateFont("Courier New", 10, True, False)
+	xAG.Color = 0xFF3399FF
+	xAG.TextColor = xui.Color_White
+	lblActiveG.Style = "-fx-padding: 2;"
+	MidPanel.AddNode(lblActiveG, 0, MHeight * 0.24, W - 10, MHeight * 0.08)
+
+	' @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+	' -------------------------------------------------------------
+	' G-Code Visual Trace Log console Window
+	' -------------------------------------------------------------
+	Dim txtConsole As TextArea
+	txtConsole.Initialize("")
+	MidPanel.AddNode(txtConsole, 0, MHeight * 0.35, (W - 10) * 0.60, MHeight * 0.60)
+	Dim xCons As B4XView = txtConsole
+	xCons.Text = "ACTUAL LINE" & CRLF & "0" & CRLF & CRLF & "(Profile: Dynamic Scaling Windows App Environment)"
+
+	' -------------------------------------------------------------
+	' Run from Here & Right-side auxiliary labels
+	' -------------------------------------------------------------
+	Dim btnRunHere As Button
+	btnRunHere.Initialize("RunHere")
+	Dim xRH As B4XView = btnRunHere
+	xRH.Text = "Open COM"  ' "RUN FROM HERE"
+	xRH.Font = fx.CreateFont("Arial", 10, True, False)
+	xRH.Color = xui.Color_White
+	btnRunHere.Style = "-fx-border-color: orange;"
+	MidPanel.AddNode(btnRunHere, (W - 10) * 0.63, MHeight * 0.35, (W - 10) * 0.37, MHeight * 0.15)
+
+	Dim lblDwell As Label
+	lblDwell.Initialize("")
+	lblDwell.Text = "DWELL TIME: 0" & CRLF & "TOOL IN USE: #1"
+	Dim xDw As B4XView = lblDwell
+	xDw.Font = fx.CreateFont("Arial", 11, False, False)
+	MidPanel.AddNode(lblDwell, (W - 10) * 0.63, MHeight * 0.55, (W - 10) * 0.37, MHeight * 0.20)
+End Sub
+'================================================================================================================================
+' -------------------------------------------------------------
+' 6. Right Hand Control Deck (Tall Master Buttons stretched vertically)
+' -------------------------------------------------------------
+'
+
+Sub CreateRightControlPanel(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+	Dim RightPanel As Pane
+	RightPanel.Initialize("")
+	RightPanel.Style = "-fx-border-color: #A0A0A0; -fx-border-width: 0 0 0 1;"
+	Parent.AddNode(RightPanel, LeftOffset, TopOffset + 5, W, TotalHeight - TopOffset - 10)
+
+	Dim RHeight As Double = TotalHeight - TopOffset - 10
+	Dim BtnW As Double = W - 15
+
+	' -------------------------------------------------------------
+	' 1st Button: Machine Offline Switch (Dark Gray Background, Yellow Border)
+	' -------------------------------------------------------------
+	Dim btnOffline As Button
+	btnOffline.Initialize("ModeOffline")
+	Dim xOff As B4XView = btnOffline
+	xOff.Text = "OFFLINE" & CRLF & "MODE"
+	xOff.Color = xui.Color_White
+	' #5A5A5A is a robust, solid dark gray background color
+	btnOffline.Style = "-fx-background-color: #5A5A5A; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: yellow; -fx-border-width: 2; -fx-text-alignment: center;"
+	RightPanel.AddNode(btnOffline, 5, 0, BtnW, RHeight * 0.10)
+
+	' -------------------------------------------------------------
+	' 2nd Button: Cycle Start (Very Light Green Background, Green Border)
+	' -------------------------------------------------------------
+	Dim btnStart As Button
+	btnStart.Initialize("ActionStart")
+	Dim xStart As B4XView = btnStart
+	xStart.Text = "CYCLE" & CRLF & "START"
+	xStart.Font = fx.CreateFont("Arial", 14, True, False)
+	xStart.Color = xui.Color_White
+	xStart.TextColor = COLOR_CNC_GREEN
+	' #E6F4EA is an ultra-clean, high-visibility light green tint
+	btnStart.Style = "-fx-background-color: #E6F4EA; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: #22B14C; -fx-border-width: 2.5; -fx-text-alignment: center;"
+	RightPanel.AddNode(btnStart, 5, RHeight * 0.13, BtnW, RHeight * 0.15)
+
+	' -------------------------------------------------------------
+	' 3rd Button: Single Line Block (Very Light Yellow Background, Yellow Border)
+	' -------------------------------------------------------------
+	Dim btnSingle As Button
+	btnSingle.Initialize("ModeSingle")
+	Dim xSing As B4XView = btnSingle
+	xSing.Text = "SINGLE" & CRLF & "LINE"
+	xSing.Color = xui.Color_White
+	' #FFFDE7 is a soft, industrial light yellow highlight tint
+	btnSingle.Style = "-fx-background-color: #FFFDE7; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: yellow; -fx-border-width: 2; -fx-text-alignment: center;"
+	RightPanel.AddNode(btnSingle, 5, RHeight * 0.30, BtnW, RHeight * 0.10)
+
+	' -------------------------------------------------------------
+	' 4th Button: Feed Hold (Very Light Yellow Background, Yellow Border)
+	' -------------------------------------------------------------
+	Dim btnHold As Button
+	btnHold.Initialize("ActionHold")
+	Dim xHold As B4XView = btnHold
+	xHold.Text = "FEED" & CRLF & "HOLD"
+	xHold.Font = fx.CreateFont("Arial", 14, True, False)
+	xHold.Color = xui.Color_White
+	xHold.TextColor = 0xFFE65100
+	' Applied matching soft industrial light yellow tint (#FFFDE7) and yellow border
+	btnHold.Style = "-fx-background-color: #FFFDE7; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: yellow; -fx-border-width: 2.5; -fx-text-alignment: center;"
+	RightPanel.AddNode(btnHold, 5, RHeight * 0.42, BtnW, RHeight * 0.15)
+
+	' -------------------------------------------------------------
+	' 5th Button: Cycle Stop (Unchanged Standard Style Block)
+	' -------------------------------------------------------------
+	Dim btnStop As Button
+	btnStop.Initialize("ActionStop")
+	Dim xStop As B4XView = btnStop
+	xStop.Text = "CYCLE" & CRLF & "STOP"
+	xStop.Font = fx.CreateFont("Arial", 11, True, False)
+	xStop.Color = xui.Color_White
+	xStop.TextColor = COLOR_CNC_RED
+	btnStop.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: red; -fx-border-width: 2; -fx-text-alignment: center;"
+	RightPanel.AddNode(btnStop, 5, RHeight * 0.59, BtnW, RHeight * 0.12)
+
+	' -------------------------------------------------------------
+	' Last Button: Emergency RESET Switch (Solid Red Background, Yellow Border)
+	' -------------------------------------------------------------
+	Dim btnReset As Button
+	btnReset.Initialize("ActionReset")
+	Dim xReset As B4XView = btnReset
+	xReset.Text = "RESET"
+	xReset.Font = fx.CreateFont("Arial Black", 14, True, False)
+	xReset.Color = COLOR_CNC_RED
+	xReset.TextColor = xui.Color_White
+
+	' UPDATED: Retained solid red background fill, replaced border rule with solid yellow
+	btnReset.Style = "-fx-background-color: red; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: yellow; -fx-border-width: 2.5;"
+	RightPanel.AddNode(btnReset, 5, (RHeight * 0.83) - 10, BtnW, RHeight * 0.16)
+
+End Sub
+
+
+
+'Sub CreateRightControlPanel(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+'	Dim RightPanel As Pane
+'	RightPanel.Initialize("")
+'	RightPanel.Style = "-fx-border-color: #A0A0A0; -fx-border-width: 0 0 0 1;"
+'	Parent.AddNode(RightPanel, LeftOffset, TopOffset + 5, W, TotalHeight - TopOffset - 10)
+'
+'	Dim RHeight As Double = TotalHeight - TopOffset - 10
+'	Dim BtnW As Double = W - 15
+'
+'	' -------------------------------------------------------------
+'	' Machine Offline Switch
+'	' -------------------------------------------------------------
+'	Dim btnOffline As Button
+'	btnOffline.Initialize("ModeOffline")
+'	Dim xOff As B4XView = btnOffline
+'	xOff.Text = "OFFLINE" & CRLF & "MODE"
+'	xOff.Color = xui.Color_White
+'	' UPDATED: Added corner radius and forced background color
+'	btnOffline.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: orange; -fx-border-width: 1; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnOffline, 5, 0, BtnW, RHeight * 0.10)
+'
+'	' -------------------------------------------------------------
+'	' Cycle Start (Fluid scaling heights)
+'	' -------------------------------------------------------------
+'	Dim btnStart As Button
+'	btnStart.Initialize("ActionStart")
+'	Dim xStart As B4XView = btnStart
+'	xStart.Text = "CYCLE" & CRLF & "START"
+'	xStart.Font = fx.CreateFont("Arial", 11, True, False)
+'	xStart.Color = xui.Color_White
+'	xStart.TextColor = COLOR_CNC_GREEN
+'	' UPDATED: Added corner radius and forced background color
+'	btnStart.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: #22B14C; -fx-border-width: 2.5; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnStart, 5, RHeight * 0.13, BtnW, RHeight * 0.15)
+'
+'	' -------------------------------------------------------------
+'	' Single Line Block
+'	' -------------------------------------------------------------
+'	Dim btnSingle As Button
+'	btnSingle.Initialize("ModeSingle")
+'	Dim xSing As B4XView = btnSingle
+'	xSing.Text = "SINGLE" & CRLF & "LINE"
+'	xSing.Color = xui.Color_White
+'	' UPDATED: Added corner radius and forced background color
+'	btnSingle.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: orange; -fx-border-width: 1; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnSingle, 5, RHeight * 0.30, BtnW, RHeight * 0.10)
+'
+'	' -------------------------------------------------------------
+'	' Feed Hold
+'	' -------------------------------------------------------------
+'	Dim btnHold As Button
+'	btnHold.Initialize("ActionHold")
+'	Dim xHold As B4XView = btnHold
+'	xHold.Text = "FEED" & CRLF & "HOLD"
+'	xHold.Font = fx.CreateFont("Arial", 11, True, False)
+'	xHold.Color = xui.Color_White
+'	xHold.TextColor = 0xFFE65100
+'	' UPDATED: Added corner radius and forced background color
+'	btnHold.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: #FF8000; -fx-border-width: 2.5; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnHold, 5, RHeight * 0.42, BtnW, RHeight * 0.15)
+'
+'	' -------------------------------------------------------------
+'	' Cycle Stop
+'	' -------------------------------------------------------------
+'	Dim btnStop As Button
+'	btnStop.Initialize("ActionStop")
+'	Dim xStop As B4XView = btnStop
+'	xStop.Text = "CYCLE" & CRLF & "STOP"
+'	xStop.Font = fx.CreateFont("Arial", 11, True, False)
+'	xStop.Color = xui.Color_White
+'	xStop.TextColor = COLOR_CNC_RED
+'	' UPDATED: Added corner radius and forced background color
+'	btnStop.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: red; -fx-border-width: 2; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnStop, 5, RHeight * 0.59, BtnW, RHeight * 0.12)
+'
+'	' -------------------------------------------------------------
+'	' Emergency RESET Switch (Locked to base panel area)
+'	' -------------------------------------------------------------
+'	Dim btnReset As Button
+'	btnReset.Initialize("ActionReset")
+'	Dim xReset As B4XView = btnReset
+'	xReset.Text = "RESET"
+'	xReset.Font = fx.CreateFont("Arial Black", 14, True, False)
+'	xReset.Color = COLOR_CNC_RED
+'	xReset.TextColor = xui.Color_White  ' High-contrast white text for solid red background
+'
+'	' Maintained previous design (Solid Red fill with matching 8px curves)
+'	btnReset.Style = "-fx-background-color: red; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: darkred; -fx-border-width: 2;"
+'	RightPanel.AddNode(btnReset, 5, (RHeight * 0.83) - 10, BtnW, RHeight * 0.16)
+'
+'End Sub
+
+'
+'Sub CreateRightControlPanel(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+'	Dim RightPanel As Pane
+'	RightPanel.Initialize("")
+'	RightPanel.Style = "-fx-border-color: #A0A0A0; -fx-border-width: 0 0 0 1;"
+'	Parent.AddNode(RightPanel, LeftOffset, TopOffset + 5, W, TotalHeight - TopOffset - 10)
+'
+'	Dim RHeight As Double = TotalHeight - TopOffset - 10
+'	Dim BtnW As Double = W - 15
+'
+'	' Machine Offline Switch
+'	Dim btnOffline As Button
+'	btnOffline.Initialize("ModeOffline")
+'	Dim xOff As B4XView = btnOffline
+'	xOff.Text = "OFFLINE" & CRLF & "MODE"
+'	xOff.Color = xui.Color_White
+'	btnOffline.Style = "-fx-border-color: orange; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnOffline, 5, 0, BtnW, RHeight * 0.10)
+'	'End Sub
+'
+'	' -------------------------------------------------------------
+'	' Cycle Start (Fluid scaling heights)
+'	' -------------------------------------------------------------
+'	Dim btnStart As Button
+'	btnStart.Initialize("ActionStart")
+'	Dim xStart As B4XView = btnStart
+'	xStart.Text = "CYCLE" & CRLF & "START"
+'	xStart.Font = fx.CreateFont("Arial", 11, True, False)
+'	xStart.Color = xui.Color_White
+'	xStart.TextColor = COLOR_CNC_GREEN
+'	btnStart.Style = "-fx-border-color: #22B14C; -fx-border-width: 2.5; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnStart, 5, RHeight * 0.13, BtnW, RHeight * 0.15)
+'
+'	' -------------------------------------------------------------
+'	' Single Line Block
+'	' -------------------------------------------------------------
+'	Dim btnSingle As Button
+'	btnSingle.Initialize("ModeSingle")
+'	Dim xSing As B4XView = btnSingle
+'	xSing.Text = "SINGLE" & CRLF & "LINE"
+'	xSing.Color = xui.Color_White
+'	btnSingle.Style = "-fx-border-color: orange; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnSingle, 5, RHeight * 0.30, BtnW, RHeight * 0.10)
+'
+'	' -------------------------------------------------------------
+'	' Feed Hold
+'	' -------------------------------------------------------------
+'	Dim btnHold As Button
+'	btnHold.Initialize("ActionHold")
+'	Dim xHold As B4XView = btnHold
+'	xHold.Text = "FEED" & CRLF & "HOLD"
+'	xHold.Font = fx.CreateFont("Arial", 11, True, False)
+'	xHold.Color = xui.Color_White
+'	xHold.TextColor = 0xFFE65100
+'	btnHold.Style = "-fx-border-color: #FF8000; -fx-border-width: 2.5; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnHold, 5, RHeight * 0.42, BtnW, RHeight * 0.15)
+'
+'	' -------------------------------------------------------------
+'	' Cycle Stop
+'	' -------------------------------------------------------------
+'	Dim btnStop As Button
+'	btnStop.Initialize("ActionStop")
+'	Dim xStop As B4XView = btnStop
+'	xStop.Text = "CYCLE" & CRLF & "STOP"
+'	xStop.Font = fx.CreateFont("Arial", 11, True, False)
+'	xStop.Color = xui.Color_White
+'	xStop.TextColor = COLOR_CNC_RED
+'	btnStop.Style = "-fx-border-color: red; -fx-border-width: 2; -fx-text-alignment: center;"
+'	RightPanel.AddNode(btnStop, 5, RHeight * 0.59, BtnW, RHeight * 0.12)
+'
+'	' -------------------------------------------------------------
+'	' Emergency RESET Switch (Locked to base panel area)
+'	' -------------------------------------------------------------
+'	Dim btnReset As Button
+'	btnReset.Initialize("ActionReset")
+'	Dim xReset As B4XView = btnReset
+'	xReset.Text = "RESET"
+'	xReset.Font = fx.CreateFont("Arial Black", 14, True, False)
+'	xReset.Color = COLOR_CNC_RED
+'	xReset.TextColor = xui.Color_White  ' Changed to White for high-contrast on a red button
+'
+'	' Added -fx-background-color: red; to the style string
+'	btnReset.Style = "-fx-background-color: red; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: darkred; -fx-border-width: 2;"
+'
+'	' To this:
+'	RightPanel.AddNode(btnReset, 5, (RHeight * 0.83) - 10, BtnW, RHeight * 0.16)
+'
+'End Sub
+
+'
+'Sub CreateDroSection(Parent As Pane, LeftOffset As Double, TopOffset As Double, W As Double, TotalHeight As Double)
+'	' Top Main DRO Container
+'	Dim DroPanel As Pane
+'	DroPanel.Initialize("")
+'	DroPanel.Style = "-fx-border-color: #A0A0A0; -fx-border-width: 1; -fx-background-color: #EBEBEB;"
+'	Parent.AddNode(DroPanel, LeftOffset + 5, TopOffset + 5, W - 10, (TotalHeight - TopOffset) * 0.32)
+'    
+'	Dim DHeight As Double = (TotalHeight - TopOffset) * 0.32
+'    
+'	' Vertical Title Header Panel
+'	Dim lblTitle As Label
+'	lblTitle.Initialize("")
+'	lblTitle.Text = "M" & CRLF & "A" & CRLF & "C" & CRLF & "H" & CRLF & "I" & CRLF & "N" & CRLF & "E"
+'	lblTitle.Alignment = "CENTER"
+'	Dim xTitle As B4XView = lblTitle
+'	xTitle.Font = fx.CreateFont("Arial Narrow", 9, True, False)
+'	xTitle.Color = xui.Color_White
+'	xTitle.TextColor = COLOR_CNC_BLUE
+'	lblTitle.Style = "-fx-border-color: #1B82D2; -fx-border-width: 1;"
+'	DroPanel.AddNode(lblTitle, 2, 2, 22, DHeight - 6)
+'    
+'	' Zero All Master Button Group
+'	Dim btnZeroAll As Button
+'	btnZeroAll.Initialize("ZeroAll")
+'	Dim xZeroAll As B4XView = btnZeroAll
+'	xZeroAll.Text = "ZERO" & CRLF & "ALL"
+'	xZeroAll.Font = fx.CreateFont("Arial", 9, True, False)
+'	xZeroAll.Color = xui.Color_White
+'	xZeroAll.TextColor = COLOR_CNC_BLUE
+'	' UPDATED: Rounded corners added to Zero All button
+'	btnZeroAll.Style = "-fx-background-color: white; -fx-background-radius: 8; -fx-border-radius: 8; -fx-border-color: #1B82D2; -fx-border-width: 1; -fx-text-alignment: center;"
+'	DroPanel.AddNode(btnZeroAll, 26, 2, 45, DHeight - 6)
+'    
+'	' Complete Responsive Multi-Axis Rows Mapping (X, Y, Z, A, B, C)
+'	Dim Axes() As String = Array As String("X", "Y", "Z", "A", "B", "C")
+'	Dim Values() As String = Array As String("10.0000", "-49.4400", "-5.0000", "0.0000", "0.0000", "0.0000")
+'    
+'	Dim RowH As Double = (DHeight - 6) / Axes.Length
+'	Dim RemainderW As Double = W - 10 - 75
+'    
+'	For i = 0 To Axes.Length - 1
+'		Dim YPos As Double = i * RowH
+'        
+'		Dim btnZero As Button
+'		btnZero.Initialize("ZeroAxis")
+'		Dim xZero As B4XView = btnZero
+'		xZero.Text = "Ø"
+'		xZero.TextColor = COLOR_CNC_BLUE
+'		xZero.Color = xui.Color_White
+'		' UPDATED: Rounded corners added to individual Axis Zero buttons
+'		btnZero.Style = "-fx-background-color: white; -fx-background-radius: 6; -fx-border-radius: 6; -fx-border-color: #A0A0A0; -fx-border-width: 1; -fx-padding: 0;"
+'		DroPanel.AddNode(btnZero, 75, YPos + 2, RemainderW * 0.06, RowH - 2)
+'        
+'		Dim lblAxis As Label
+'		lblAxis.Initialize("")
+'		lblAxis.Text = Axes(i)
+'		lblAxis.Alignment = "CENTER"
+'		Dim xAx As B4XView = lblAxis
+'		xAx.Font = fx.CreateFont("Arial", 12, True, False)
+'		xAx.TextColor = COLOR_CNC_BLUE
+'		lblAxis.Style = "-fx-border-color: #A0A0A0;"
+'		DroPanel.AddNode(lblAxis, 75 + (RemainderW * 0.06), YPos + 2, RemainderW * 0.06, RowH - 2)
+'        
+'		' Blue Rectangle Outline Pane around the Display Elements
+'		Dim pnlValueBorder As Pane
+'		pnlValueBorder.Initialize("")
+'		pnlValueBorder.Style = "-fx-background-color: transparent; -fx-border-color: #1B82D2; -fx-border-width: 1.5; -fx-border-radius: 4;"
+'		Dim BoxLeft As Double = 75 + (RemainderW * 0.12)
+'		Dim BoxWidth As Double = RemainderW * 0.78
+'		DroPanel.AddNode(pnlValueBorder, BoxLeft, YPos + 2, BoxWidth, RowH - 2)
+'
+'		Dim lblScale As Label
+'		lblScale.Initialize("")
+'		lblScale.Text = "DTG 0.0" & CRLF & "Scale 1.0"
+'		Dim xScale As B4XView = lblScale
+'		xScale.Font = fx.CreateFont("Arial", 8, False, False)
+'		xScale.TextColor = COLOR_CNC_BLUE
+'		lblScale.Style = "-fx-padding: 0 0 0 4;" 
+'		DroPanel.AddNode(lblScale, 75 + (RemainderW * 0.12), YPos + 2, RemainderW * 0.20, RowH - 2)
+'        
+'		Dim lblVal As Label
+'		lblVal.Initialize("")
+'		lblVal.Text = Values(i)
+'		lblVal.Alignment = "CENTER_RIGHT"
+'		Dim xVal As B4XView = lblVal
+'		xVal.Font = fx.CreateFont("Courier New", 18, True, False)
+'		xVal.TextColor = COLOR_CNC_BLUE
+'		lblVal.Style = "-fx-padding: 0 5 0 0;"
+'		DroPanel.AddNode(lblVal, 75 + (RemainderW * 0.32), YPos + 2, RemainderW * 0.58, RowH - 2)
+'        
+'		Dim btnHome As Button
+'		btnHome.Initialize("HomeAxis")
+'		Dim xHome As B4XView = btnHome
+'		xHome.Text = "🎯"
+'		xHome.Color = xui.Color_White
+'		' UPDATED: Rounded corners added to Axis Home buttons
+'		btnHome.Style = "-fx-background-color: white; -fx-background-radius: 6; -fx-border-radius: 6; -fx-border-color: red; -fx-border-width: 1; -fx-padding: 0;"
+'		DroPanel.AddNode(btnHome, 75 + (RemainderW * 0.90), YPos + 2, RemainderW * 0.09, RowH - 2)
+'	Next
+'End Sub
+'
+
+
+' -------------------------------------------------------------
+' Event Observers
+' -------------------------------------------------------------
+Sub RunHere_Click
+	' First list available ports
+	'sc.ListPorts
+    
+	' Then open the one you want (replace COM3 with your actual port)
+	sc.OpenPort("COM37")
+	statusTimer.Enabled = True
+End Sub
+
+
+
+Sub MenuBtn_Click
+	Dim btn As Button = Sender
+	Log("Menu: " & btn.Text)
+End Sub
+
+Sub ActionReset_Click
+	Log("RESET PRESSED!")
+End Sub
+
+
+Sub FileAct_Click
+	Dim btn As Button = Sender
+	If btn.Text = "LOAD FILE" Then
+		LoadAndDisplayGCodeFile
+	End If
+End Sub
+
+ 
+
+Sub IconBtn_Click
+    Dim btn As Button = Sender    
+    Select btn.Text
+        Case "RESET":  Plotter.ResetView
+        Case "Z_ALL":  Plotter.TriggerZoomAll
+        Case "Z_IN":   Plotter.TriggerZoomDelta(1.2)
+        Case "Z_OUT":  Plotter.TriggerZoomDelta(0.8)
+        Case "TOP":    Plotter.SetViewProjection("TOP")
+        Case "FRONT":  Plotter.SetViewProjection("FRONT")
+        Case "SIDE":   Plotter.SetViewProjection("SIDE")
+        Case "ISO":    Plotter.SetViewProjection("ISO")
+    End Select
+End Sub
+
+
+
+Sub LoadAndDisplayGCodeFile
+	Dim fc As FileChooser
+	fc.Initialize
+	fc.Title = "Select G-Code File"
+	fc.SetExtensionFilter("G-Code Files", Array As String("*.nc", "*.gcode", "*.txt", "*.tap"))
+    
+	Dim SelectedFile As String = fc.ShowOpen(MainForm)
+	If SelectedFile = "" Then Return
+    
+	Dim LastSlash As Int = SelectedFile.LastIndexOf("\")
+	Dim Folder As String = SelectedFile.SubString2(0, LastSlash)
+	Dim FileNameStr As String = SelectedFile.SubString(LastSlash + 1)
+    
+	Plotter.LoadFileFromPath(Folder, FileNameStr)
+    
+	CurrentGCodeLines = Plotter.GetGCodeLines
+	GcodeListView.Items.Clear
+	For Each line As String In CurrentGCodeLines
+		GcodeListView.Items.Add(line)
+	Next
+    
+	UpdatingHighlight = True
+	GcodeListView.SelectedIndex = 0
+	GcodeListView.ScrollTo(0)
+	UpdatingHighlight = False
+End Sub
+
+Sub UpdateGcodeHighlight(lineIndex As Int)
+	If UpdatingHighlight Then Return
+	If GcodeListView.IsInitialized = False Then Return
+	If lineIndex >= 0 And lineIndex < GcodeListView.Items.Size Then
+		UpdatingHighlight = True
+		GcodeListView.SelectedIndex = lineIndex
+		GcodeListView.ScrollTo(lineIndex)
+		UpdatingHighlight = False
+	End If
+End Sub
+
+Sub lstGcode_SelectedIndexChanged(Index As Int)
+	If UpdatingHighlight Then Return
+	If Index > -1 Then
+		Plotter.SetCursorToLine(Index)
+	End If
+End Sub
+
+Sub statusTimer_Tick
+	'Dim cmd() As Byte = "?" & Chr(10)   ' ? + newline
+	'sc.serial.Write(cmd.GetBytes("UTF8"))
+	sc.Send("?\n")   ' send status query every second
+
+End Sub
+
+Sub SerialMessageReceived(msg As String)
+	' Append incoming message to your Actual Line text box
+	xCons.Text = xCons.Text & CRLF & msg
+End Sub
+
